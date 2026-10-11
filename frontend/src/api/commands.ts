@@ -137,12 +137,14 @@ export async function pickScanSaveTarget(): Promise<string | null> {
   return target;
 }
 
-/** 发起扫描件转换（后台任务），返回 task_id，进度经事件推送。 */
+/** 发起扫描件转换（后台任务），返回 task_id，进度经事件推送。
+ * tone："bw" 白底黑字，"color" 保留原色的彩色扫描件。 */
 export async function startScanConversion(
   pageIds: number[],
   target: string,
   dpi: number,
   threshold: number,
+  tone: "bw" | "color" = "bw",
 ): Promise<string> {
   const handle = await invoke<{ task_id: string }>(
     "converter.convert_pages_to_scan",
@@ -150,6 +152,7 @@ export async function startScanConversion(
     target,
     dpi,
     threshold,
+    tone,
   );
   return handle.task_id;
 }

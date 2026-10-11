@@ -151,11 +151,17 @@ class ConverterApi:
 
     @envelope
     def convert_pages_to_scan(
-        self, page_ids: list[int], target: str, dpi: int = 200, threshold: int = 32
+        self,
+        page_ids: list[int],
+        target: str,
+        dpi: int = 200,
+        threshold: int = 32,
+        tone: str = "bw",
     ) -> dict:
-        """把当前文档的指定页面转为白底黑字扫描件，写出新 PDF。
+        """把当前文档的指定页面转为扫描件，写出新 PDF。
 
         立即返回 task_id，进度/结果走事件（conversion_progress / task_done）。
+        tone："bw" 白底黑字（默认），"color" 保留原色的彩色扫描件。
         page_ids 为当前文档的 page_id（按逻辑顺序），依据打开时的文档状态
         解析出源页下标与分割裁剪框后交给转换器，不感知后续编辑操作。
         """
@@ -194,6 +200,7 @@ class ConverterApi:
                     threshold=int(threshold),
                     password=password,
                     progress_cb=on_progress,
+                    tone=str(tone),
                 )
             finally:
                 self._cancel_flags.pop(task_id, None)

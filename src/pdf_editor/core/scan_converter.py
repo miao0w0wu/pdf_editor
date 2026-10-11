@@ -4,21 +4,26 @@
 压平光照阴影与灰底 —— 背景变纯白，文字加深；签字、指印、公章等灰阶
 内容与纸上原有的大块黑色印记（如扫描条纹）原样保留，不做硬二值化。
 
+两种输出色调（tone）：
+- "bw"（默认）：转灰度后增强，白底黑字，对比最强，适合归档/打印；
+- "color"：逐通道增强且拉伸柔和，背景提白的同时保留墨迹/印章原本的
+  色相与饱和度（彩色扫描件效果），适合保真存档。
+
 算法（对拍照页与原生页通用）：
-1. PyMuPDF 按 target dpi 渲染页面彩色位图（自动应用页面旋转）；
+1. PyMuPDF 按 target dpi 渲染页面位图（自动应用页面旋转）；
 2. 纸面检测（在降采样图上）：Otsu 取亮色区域 → 形态学闭/开 → 最大
    轮廓取四角 → 四边向内吸附到真实纸面亮暗边界（逐点走查 + 滑动中位
    数剔离群 + L1 直线拟合；对仍压在深色背景上的区段整线内移）→
    透视矫正裁出纸面。亮区≈整页的原生 PDF 页面自动跳过裁剪；
-3. 提白：逐通道用大尺度高斯估计光照背景并相除（背景估计在降采样图
-   上计算，控制大 dpi 下的内存/耗时），底色拉平成白色；再做黑白场
-   拉伸（threshold 映射黑场：越大文字越深）与轻度锐化；
+3. 提白：用大尺度高斯估计光照背景并相除（背景估计在降采样图上计算，
+   控制大 dpi 下的内存/耗时），底色拉平成白色；再做黑白场拉伸
+   （threshold 映射黑场：越大文字/墨迹越深）与轻度锐化；
 4. 写出：PyMuPDF 新建文档逐页 insert_image（PNG）。页面尺寸：裁剪过
    的页 = 纸面像素按 dpi 换算的物理尺寸；未裁剪页 = 裁剪区域 pt 尺寸，
    与原页/分割子页一致。
 
-依赖说明：纸面检测与透视矫正使用 OpenCV（opencv-python-headless），
-连接域/轮廓/仿射变换若用纯 Pillow 实现既繁琐又不可靠。
+依赖说明：纸面检测与透视矫正使用 OpenCV（opencv-python），连接域/
+轮廓/仿射变换若用纯 Pillow 实现既繁琐又不可靠。
 
 偏离 spec"pypdf 负责写"约定的说明：pypdf 6.x 已移除图片嵌入 API
 （见 image_converter.py 的同款说明），本模块需要"图像页 + 精确页面
@@ -30,12 +35,14 @@
 
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pymupdf
+from PIL import Image
 
 from ..utils.paths import safe_output_path
 from .exceptions import ConversionError, PdfOpenError, PdfWriteError
@@ -45,6 +52,8 @@ MIN_DPI = 72
 MAX_DPI = 300
 DEFAULT_DPI = 200
 DEFAULT_THRESHOLD = 32
+DEFAULT_TONE = "bw"
+TONES = ("bw", "color")
 
 # 纸面检测在降采样图上进行（最长边），四角坐标按比例还原到全分辨率
 _DETECT_MAX_SIDE = 900
@@ -64,12 +73,14 @@ class ScanConverter:
         threshold: int = DEFAULT_THRESHOLD,
         password: str | None = None,
         progress_cb: Callable[[int, int], None] | None = None,
+        tone: str = DEFAULT_TONE,
     ) -> Path:
         """转换指定页面并写出新 PDF，返回输出路径。
 
         pages：每项为 (source_index, 归一化裁剪框)；裁剪框 (x0, y0, x1, y1)
         值域 0~1、原点左下（mediabox 坐标系），None 表示整页。
-        threshold：去底强度 1~255，映射为黑白场拉伸的黑场，越大文字越深。
+        threshold：去底强度 1~255，映射为黑白场拉伸的黑场，越大文字/墨迹越深。
+        tone："bw" 白底黑字（灰度输出），"color" 保留原色的彩色扫描件。
         progress_cb(done, total)：逐页进度检查点，可抛异常中断任务。
         """
         out = safe_output_path(target)
@@ -79,6 +90,8 @@ class ScanConverter:
             raise ConversionError(f"不支持的分辨率 {dpi} dpi（{MIN_DPI}~{MAX_DPI}）")
         if not 1 <= int(threshold) <= 255:
             raise ConversionError(f"非法阈值: {threshold}")
+        if tone not in TONES:
+            raise ConversionError(f"不支持的色调: {tone}（可选 {'/'.join(TONES)}）")
 
         src = self._open_source(source_path, password)
         try:
@@ -89,7 +102,7 @@ class ScanConverter:
                     clip = self._clip_rect(src, source_index, crop)
                     img = self._render_rgb(src, source_index, clip, int(dpi))
                     paper, cropped = self._crop_paper(img)
-                    cleaned = self._enhance(paper, int(threshold))
+                    cleaned = self._enhance(paper, int(threshold), tone)
                     if cropped:
                         # 裁出的是纸面本身，页面尺寸按 dpi 换算成物理尺寸
                         w_pt = cleaned.shape[1] * 72.0 / dpi
@@ -358,33 +371,46 @@ class ScanConverter:
 
     # ---------- 提白增强 ----------
 
-    def _enhance(self, img: np.ndarray, threshold: int) -> np.ndarray:
-        """逐通道背景除法提白 + 黑白场拉伸 + 轻度锐化，返回 RGB 图像。"""
+    def _enhance(self, img: np.ndarray, threshold: int, tone: str) -> np.ndarray:
+        """背景除法提白 + 黑白场拉伸 + 轻度锐化。
+
+        tone="bw"：先转灰度（输出单通道，白底黑字，对比最强）；
+        tone="color"：逐通道处理且拉伸柔和，保留墨迹/印章原本的色彩。
+        """
+        if tone == "bw":
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            black = float(min(160, max(24, threshold * 3 // 2)))
+            white = 232.0
+        else:
+            black = float(max(8, min(96, threshold // 2)))
+            white = 240.0
         h, w = img.shape[:2]
-        black = float(min(160, max(24, threshold * 3 // 2)))
-        white = 232.0
-        out = np.empty((h, w, 3), np.uint8)
+        out = np.empty((h, w) if img.ndim == 2 else (h, w, 3), np.uint8)
         bh, bw = max(1, h // _BG_DOWNSCALE), max(1, w // _BG_DOWNSCALE)
         sigma = max(15.0, 0.09 * min(bh, bw))
-        for c in range(3):
-            ch = img[:, :, c].astype(np.float32)
+        channels = range(1) if img.ndim == 2 else range(3)
+        for c in channels:
+            ch = (img if img.ndim == 2 else img[:, :, c]).astype(np.float32)
             small = cv2.resize(ch, (bw, bh), interpolation=cv2.INTER_AREA)
             bg = cv2.GaussianBlur(small, (0, 0), sigma)
             bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
             # 相除后底色拉平到 1.0（白），宽黑印记随局部背景估计保留为深色
             ratio = np.clip(ch / np.maximum(bg, 1.0), 0.0, 1.0) * 255.0
             stretched = np.clip((ratio - black) / (white - black) * 255.0, 0.0, 255.0)
-            out[:, :, c] = stretched.astype(np.uint8)
+            if img.ndim == 2:
+                out[:, :] = stretched.astype(np.uint8)
+            else:
+                out[:, :, c] = stretched.astype(np.uint8)
         blur = cv2.GaussianBlur(out, (0, 0), 1.0)
         return cv2.addWeighted(out, 1.4, blur, -0.4, 0)
 
     # ---------- 写出 ----------
 
     def _png_bytes(self, img: np.ndarray) -> bytes:
-        ok, buf = cv2.imencode(".png", img)
-        if not ok:  # pragma: no cover - imencode 实际不会失败
-            raise PdfWriteError("PNG 编码失败")
-        return buf.tobytes()
+        # 用 PIL 编码：cv2.imencode 按 BGR 解释输入，会把 RGB 输出的红蓝写反
+        buf = io.BytesIO()
+        Image.fromarray(img).save(buf, format="PNG", optimize=False)
+        return buf.getvalue()
 
     def _write(self, doc: pymupdf.Document, target: Path) -> None:
         try:

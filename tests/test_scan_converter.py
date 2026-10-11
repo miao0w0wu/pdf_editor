@@ -203,3 +203,74 @@ class TestScanConverter:
         assert samples[(h - 6) * w + (w - 6)] == 255
         # 文字保留为深色
         assert min(samples) < 80
+
+    @staticmethod
+    def _color_ink_pdf(tmp_path: Path) -> Path:
+        """白底 + 红色圆章 + 蓝色墨迹块的彩色单页 PDF（1px=1pt）。"""
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (400, 300), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((280, 40, 360, 120), fill=(190, 60, 55))  # 红章
+        draw.rectangle((40, 180, 200, 220), fill=(40, 70, 160))  # 蓝墨
+        png = tmp_path / "color_ink.png"
+        img.save(str(png))
+        src = tmp_path / "color_ink.pdf"
+        doc = pymupdf.open()
+        page = doc.new_page(width=400, height=300)
+        page.insert_image(page.rect, filename=str(png))
+        doc.save(str(src))
+        doc.close()
+        return src
+
+    @staticmethod
+    def _rgb_pixels(path: Path) -> tuple[int, int, list[int]]:
+        doc = pymupdf.open(str(path))
+        pix = doc[0].get_pixmap(colorspace=pymupdf.csRGB, alpha=False)
+        samples = list(pix.samples)
+        size = (pix.width, pix.height)
+        doc.close()
+        return size[0], size[1], samples
+
+    def test_color_tone_preserves_ink_colors(self, tmp_path: Path):
+        """彩色模式：背景提白的同时保留红章/蓝墨的色相与饱和度。"""
+        src = self._color_ink_pdf(tmp_path)
+        out = tmp_path / "color_out.pdf"
+        ScanConverter().convert(src, [(0, None)], out, dpi=96, threshold=32, tone="color")
+        w, h, px = self._rgb_pixels(out)
+
+        def count_saturated(pred) -> int:
+            n = 0
+            for i in range(0, len(px), 3):
+                r, g, b = px[i], px[i + 1], px[i + 2]
+                if pred(r, g, b):
+                    n += 1
+            return n
+
+        reds = count_saturated(lambda r, g, b: r - max(g, b) > 60)
+        blues = count_saturated(lambda r, g, b: b - max(r, g) > 40)
+        assert reds > 200, f"红色印章色彩丢失（红色像素 {reds}）"
+        assert blues > 200, f"蓝色墨迹色彩丢失（蓝色像素 {blues}）"
+        # 背景仍为白色
+        assert px[5 * w * 3 + 5 * 3] == 255
+
+    def test_bw_tone_outputs_grayscale(self, tmp_path: Path):
+        """黑白模式：彩色墨迹转灰度输出（R=G=B），白底黑字行为不变。"""
+        src = self._color_ink_pdf(tmp_path)
+        out = tmp_path / "bw_out.pdf"
+        ScanConverter().convert(src, [(0, None)], out, dpi=96, threshold=32, tone="bw")
+        w, h, px = self._rgb_pixels(out)
+        colored = 0
+        for i in range(0, len(px), 3):
+            r, g, b = px[i], px[i + 1], px[i + 2]
+            if max(r, g, b) - min(r, g, b) > 8:
+                colored += 1
+        assert colored == 0, f"黑白模式输出含彩色像素 {colored} 个"
+        assert px[5 * w * 3 + 5 * 3] == 255  # 背景白色
+        assert min(px) < 80  # 内容为深色
+
+    def test_invalid_tone_rejected(self, gray_text_pdf: Path, tmp_path: Path):
+        with pytest.raises(ConversionError):
+            ScanConverter().convert(
+                gray_text_pdf, [(0, None)], tmp_path / "out.pdf", tone="sepia"
+            )

@@ -1,5 +1,6 @@
-/** 转扫描件对话框：把 PDF 页面处理成白底黑字的扫描件（WPS 风格）。
+/** 转扫描件对话框：把 PDF 页面处理成扫描件效果（裁纸面 + 白底提亮）。
  *
+ * 输出色彩两种：彩色（保留墨迹/印章原色，默认）/ 黑白（白底黑字）。
  * 页面来源三种：全部页面 / 勾选页面 / 输入页码。
  * 转换为后台任务：立即返回 task_id，进度/结果经 store.tasks 镜像
  * （BackendEvents 统一订阅 conversion_progress / task_done / task_error）。
@@ -17,6 +18,7 @@ import {
 import { useDocumentStore } from "../../store/document";
 
 type SelectMode = "all" | "checked" | "input";
+type Tone = "bw" | "color";
 
 export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { message } = App.useApp();
@@ -28,6 +30,7 @@ export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => vo
   const [input, setInput] = useState("");
   const [dpi, setDpi] = useState(200);
   const [threshold, setThreshold] = useState(32);
+  const [tone, setTone] = useState<Tone>("color");
   const [target, setTarget] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
 
@@ -62,6 +65,7 @@ export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => vo
       setInput("");
       setDpi(200);
       setThreshold(32);
+      setTone("color");
       setTarget(null);
       setTaskId(null);
     }
@@ -87,7 +91,7 @@ export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => vo
     try {
       const ids =
         mode === "all" ? allIds : mode === "checked" ? checkedIds : parsePageNumbers(input, pages);
-      const id = await startScanConversion(ids, target, dpi, threshold);
+      const id = await startScanConversion(ids, target, dpi, threshold, tone);
       setTaskId(id);
     } catch (e) {
       void message.error(`启动转换失败：${errorMessage(e)}`);
@@ -200,6 +204,19 @@ export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => vo
             </>
           )}
           <Space wrap>
+            <Typography.Text strong>输出色彩：</Typography.Text>
+            <Radio.Group
+              data-testid="scan-tone"
+              value={tone}
+              onChange={(e) => setTone(e.target.value as Tone)}
+              optionType="button"
+              options={[
+                { value: "color", label: "彩色（保留原色）" },
+                { value: "bw", label: "黑白（白底黑字）" },
+              ]}
+            />
+          </Space>
+          <Space wrap>
             <Typography.Text strong>分辨率：</Typography.Text>
             <Radio.Group
               value={dpi}
@@ -223,7 +240,7 @@ export function ScanDialog({ open, onClose }: { open: boolean; onClose: () => vo
               tooltip={{ open: false }}
             />
             <Typography.Text type="secondary">
-              越大背景越白、浅色笔迹越容易被丢弃；越小笔画越浓、噪点越多。默认 32。
+              越大背景越白、文字/墨迹越深（彩色模式下墨迹颜色越浓）。默认 32。
             </Typography.Text>
           </div>
           <Space wrap>
