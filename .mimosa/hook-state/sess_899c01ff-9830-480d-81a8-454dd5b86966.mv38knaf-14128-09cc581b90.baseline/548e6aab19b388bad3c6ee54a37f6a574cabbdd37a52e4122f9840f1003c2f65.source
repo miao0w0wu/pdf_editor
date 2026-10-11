@@ -1,0 +1,100 @@
+/** 组合命令层：对话框选择 + bridge 调用 + store 更新。
+ *
+ * 组件只调用这里的命令，不直接拼装 invoke 序列；
+ * 失败时抛出（多为 ApiError），由调用方用 antd message 展示。
+ */
+import { invoke, ApiError } from "./client";
+import type { DocumentStatePayload } from "../types";
+import { useDocumentStore } from "../store/document";
+
+export function errorMessage(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/** Windows/Unix 分隔符统一后比较路径（仅用于“别存回源文件”的保守判断）。 */
+function samePath(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/[/\\]+/g, "\\").replace(/\\+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/** 打开指定路径的 PDF 并开始批量生成缩略图。 */
+export async function openPdfAtPath(path: string, password?: string): Promise<void> {
+  const store = useDocumentStore.getState();
+  const state = await invoke<DocumentStatePayload>("document.open_document", path, password ?? null);
+  store.applyDocumentState(state);
+  store.clearThumbnails();
+  store.setSourcePath(path);
+  store.setPasswordPrompt(null);
+  void invoke("converter.generate_thumbnails", 72).catch((e) => {
+    // 缩略图失败不阻塞阅读，主视图仍可渲染
+    console.error("generate_thumbnails 失败", e);
+  });
+}
+
+/** 走原生对话框选 PDF 并打开；取消静默返回；加密 PDF 弹密码框。 */
+export async function openPdfFromDialog(): Promise<void> {
+  const path = await invoke<string | null>("dialog.pick_pdf_file");
+  if (!path) return;
+  try {
+    await openPdfAtPath(path);
+  } catch (e) {
+    if (e instanceof ApiError && /加密|密码/.test(e.message)) {
+      useDocumentStore.getState().setPasswordPrompt({ path });
+      return;
+    }
+    throw e;
+  }
+}
+
+/** 保存路径默认名：源文件名 + -edited.pdf（避免误覆盖打开中的源文件）。 */
+function defaultSaveName(): string {
+  const { sourcePath } = useDocumentStore.getState();
+  if (!sourcePath) return "output.pdf";
+  const base = sourcePath.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? "output";
+  const stem = base.replace(/\.pdf$/i, "");
+  return `${stem}-edited.pdf`;
+}
+
+/** 保存到用户选择的目标路径，返回目标（取消返回 null）。 */
+export async function saveDocumentAs(pageIds: number[] | null): Promise<string | null> {
+  const { sourcePath } = useDocumentStore.getState();
+  const target = await invoke<string | null>(
+    "dialog.pick_save_pdf_path",
+    defaultSaveName(),
+  );
+  if (!target) return null;
+  if (sourcePath && samePath(sourcePath, target)) {
+    // pypdf/pymupdf 持有源文件句柄，就地覆盖会损坏后续渲染
+    throw new ApiError("SaveOverSource", "不能覆盖当前打开的文件，请另选保存位置");
+  }
+  if (pageIds === null) {
+    await invoke("document.save_document", target);
+  } else {
+    await invoke("document.save_document_as", target, pageIds);
+  }
+  return target;
+}
+
+export async function deleteSelected(): Promise<void> {
+  const { selectedIds } = useDocumentStore.getState();
+  if (selectedIds.size === 0) return;
+  const state = await invoke<DocumentStatePayload>("document.delete_pages", [...selectedIds]);
+  useDocumentStore.getState().applyDocumentState(state);
+}
+
+export async function reorderPages(newOrder: number[]): Promise<void> {
+  const state = await invoke<DocumentStatePayload>("document.reorder_pages", newOrder);
+  useDocumentStore.getState().applyDocumentState(state);
+}
+
+export async function splitPage(
+  pageId: number,
+  mode: "horizontal" | "vertical",
+  ratios: number[],
+): Promise<DocumentStatePayload> {
+  const state = await invoke<DocumentStatePayload>("document.split_page", pageId, mode, ratios);
+  useDocumentStore.getState().applyDocumentState(state);
+  return state;
+}

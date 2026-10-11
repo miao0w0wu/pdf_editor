@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-10-11T01:30:12.865Z",
+  "sessionId": "sess_2199e63b-1c43-4c95-b82c-57c5c3dabc32",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "C:/Users/zc961/.zcode/cli/memories/projects/python-b229d436c8f85e08/memory/py-launcher-shim-fix.md",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 4,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

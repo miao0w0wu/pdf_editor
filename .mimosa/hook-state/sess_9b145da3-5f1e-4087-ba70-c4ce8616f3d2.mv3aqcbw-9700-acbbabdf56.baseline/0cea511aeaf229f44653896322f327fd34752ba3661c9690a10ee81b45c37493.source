@@ -1,0 +1,387 @@
+"""扫描件转换器：把 PDF 页面处理成 WPS 扫描件风格的"白底黑字"效果。
+
+目标效果（WPS 扫描件风格）：拍照件自动裁出纸面并透视矫正、铺满页面，
+压平光照阴影与灰底 —— 背景变纯白，文字加深；签字、指印、公章等灰阶
+内容与纸上原有的大块黑色印记（如扫描条纹）原样保留，不做硬二值化。
+
+算法（对拍照页与原生页通用）：
+1. PyMuPDF 按 target dpi 渲染页面彩色位图（自动应用页面旋转）；
+2. 纸面检测（在降采样图上）：Otsu 取亮色区域 → 形态学闭/开 → 最大
+   轮廓取四角 → 四边向内吸附到真实纸面亮暗边界（逐点走查 + 滑动中位
+   数剔离群 + L1 直线拟合；对仍压在深色背景上的区段整线内移）→
+   透视矫正裁出纸面。亮区≈整页的原生 PDF 页面自动跳过裁剪；
+3. 提白：逐通道用大尺度高斯估计光照背景并相除（背景估计在降采样图
+   上计算，控制大 dpi 下的内存/耗时），底色拉平成白色；再做黑白场
+   拉伸（threshold 映射黑场：越大文字越深）与轻度锐化；
+4. 写出：PyMuPDF 新建文档逐页 insert_image（PNG）。页面尺寸：裁剪过
+   的页 = 纸面像素按 dpi 换算的物理尺寸；未裁剪页 = 裁剪区域 pt 尺寸，
+   与原页/分割子页一致。
+
+依赖说明：纸面检测与透视矫正使用 OpenCV（opencv-python-headless），
+连接域/轮廓/仿射变换若用纯 Pillow 实现既繁琐又不可靠。
+
+偏离 spec"pypdf 负责写"约定的说明：pypdf 6.x 已移除图片嵌入 API
+（见 image_converter.py 的同款说明），本模块需要"图像页 + 精确页面
+尺寸"的写出能力，PyMuPDF 是既有依赖中最直接的实现。
+
+线程安全：本类无共享状态，convert() 每次调用独立打开源文件，
+可被 api 层任务线程安全调用（含并发）。
+"""
+
+from __future__ import annotations
+
+import io
+from collections.abc import Callable
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pymupdf
+
+from ..utils.paths import safe_output_path
+from .exceptions import ConversionError, PdfOpenError, PdfWriteError
+
+# 支持的渲染分辨率范围（dpi）。文件输出不走 base64，上限可比渲染器的 150 放宽
+MIN_DPI = 72
+MAX_DPI = 300
+DEFAULT_DPI = 200
+DEFAULT_THRESHOLD = 32
+
+# 纸面检测在降采样图上进行（最长边），四角坐标按比例还原到全分辨率
+_DETECT_MAX_SIDE = 900
+# 背景估计先降采样再算，控制大 dpi 下的内存与耗时
+_BG_DOWNSCALE = 4
+
+
+class ScanConverter:
+    """把指定页面转换为 WPS 风格扫描件并组装成新 PDF。"""
+
+    def convert(
+        self,
+        source_path: str | Path,
+        pages: list[tuple[int, tuple[float, float, float, float] | None]],
+        target: str | Path,
+        dpi: int = DEFAULT_DPI,
+        threshold: int = DEFAULT_THRESHOLD,
+        password: str | None = None,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> Path:
+        """转换指定页面并写出新 PDF，返回输出路径。
+
+        pages：每项为 (source_index, 归一化裁剪框)；裁剪框 (x0, y0, x1, y1)
+        值域 0~1、原点左下（mediabox 坐标系），None 表示整页。
+        threshold：去底强度 1~255，映射为黑白场拉伸的黑场，越大文字越深。
+        progress_cb(done, total)：逐页进度检查点，可抛异常中断任务。
+        """
+        out = safe_output_path(target)
+        if not pages:
+            raise ConversionError("未提供任何页面")
+        if not MIN_DPI <= int(dpi) <= MAX_DPI:
+            raise ConversionError(f"不支持的分辨率 {dpi} dpi（{MIN_DPI}~{MAX_DPI}）")
+        if not 1 <= int(threshold) <= 255:
+            raise ConversionError(f"非法阈值: {threshold}")
+
+        src = self._open_source(source_path, password)
+        try:
+            out_doc = pymupdf.open()
+            try:
+                total = len(pages)
+                for i, (source_index, crop) in enumerate(pages):
+                    clip = self._clip_rect(src, source_index, crop)
+                    img = self._render_rgb(src, source_index, clip, int(dpi))
+                    paper, cropped = self._crop_paper(img)
+                    cleaned = self._enhance(paper, int(threshold))
+                    if cropped:
+                        # 裁出的是纸面本身，页面尺寸按 dpi 换算成物理尺寸
+                        w_pt = cleaned.shape[1] * 72.0 / dpi
+                        h_pt = cleaned.shape[0] * 72.0 / dpi
+                    else:
+                        w_pt, h_pt = clip.width, clip.height
+                    page = out_doc.new_page(width=w_pt, height=h_pt)
+                    page.insert_image(page.rect, stream=self._png_bytes(cleaned))
+                    if progress_cb is not None:
+                        progress_cb(i + 1, total)
+                self._write(out_doc, out)
+            finally:
+                out_doc.close()
+        finally:
+            src.close()
+        return out
+
+    # ---------- 渲染与纸面检测 ----------
+
+    def _open_source(self, source_path: str | Path, password: str | None) -> pymupdf.Document:
+        """打开源文件；加密文档必须用打开文档时的同一密码。"""
+        p = Path(source_path)
+        if not p.is_file():
+            raise PdfOpenError(f"文件不存在: {p}")
+        try:
+            doc = pymupdf.open(str(p))
+            if doc.needs_pass:
+                if password is None or not doc.authenticate(password):
+                    doc.close()
+                    raise PdfOpenError("PDF 已加密，无法转换扫描件")
+        except PdfOpenError:
+            raise
+        except Exception as e:
+            raise PdfOpenError(f"无法打开 PDF（文件可能损坏）: {e}") from e
+        return doc
+
+    def _clip_rect(
+        self,
+        doc: pymupdf.Document,
+        source_index: int,
+        crop: tuple[float, float, float, float] | None,
+    ) -> pymupdf.Rect:
+        """把 mediabox 归一化裁剪框换算为 PyMuPDF 显示坐标 clip 矩形。
+
+        get_pixmap(clip=...) 使用应用 /Rotate 之后的显示坐标系（原点左上），
+        裁剪框以 mediabox（原点左下）为基准，按旋转角分四种情形换算。
+        """
+        page = doc.load_page(source_index)
+        if not 0 <= source_index < doc.page_count:
+            raise ConversionError(f"页码越界: {source_index}")
+        if crop is None:
+            return page.rect
+        x0, y0, x1, y1 = crop
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ConversionError(f"非法裁剪框: {crop}")
+        w, h = page.rect.width, page.rect.height
+        rot = page.rotation % 360
+        if rot == 90:
+            nx0, ny0, nx1, ny1 = y0 * w, x0 * h, y1 * w, x1 * h
+        elif rot == 180:
+            nx0, ny0, nx1, ny1 = (1 - x1) * w, y0 * h, (1 - x0) * w, y1 * h
+        elif rot == 270:
+            nx0, ny0, nx1, ny1 = (1 - y1) * w, (1 - x1) * h, (1 - y0) * w, (1 - x0) * h
+        else:
+            nx0, ny0, nx1, ny1 = x0 * w, (1 - y1) * h, x1 * w, (1 - y0) * h
+        return pymupdf.Rect(nx0, ny0, nx1, ny1)
+
+    def _render_rgb(
+        self,
+        doc: pymupdf.Document,
+        source_index: int,
+        clip: pymupdf.Rect,
+        dpi: int,
+    ) -> np.ndarray:
+        """渲染裁剪区域为 RGB ndarray（应用页面旋转）。"""
+        page = doc.load_page(source_index)
+        zoom = dpi / 72.0
+        pix = page.get_pixmap(
+            matrix=pymupdf.Matrix(zoom, zoom),
+            colorspace=pymupdf.csRGB,
+            alpha=False,
+            clip=clip,
+        )
+        return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
+
+    def _crop_paper(self, img: np.ndarray) -> tuple[np.ndarray, bool]:
+        """检测纸面四角并透视裁正；亮区≈整页（原生页面）时不裁剪。"""
+        h, w = img.shape[:2]
+        scale = min(1.0, _DETECT_MAX_SIDE / float(max(h, w)))
+        if scale < 1.0:
+            small = cv2.resize(
+                img,
+                (int(round(w * scale)), int(round(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            small = img
+        quad = self._detect_quad(small)
+        if quad is None:
+            return img, False
+        if cv2.contourArea(quad) / float(h * w) > 0.99:
+            return img, False
+        return self._warp_paper(img, quad / scale), True
+
+    def _detect_quad(self, img: np.ndarray) -> np.ndarray | None:
+        """在降采样图上检测纸面四角；检测失败返回 None。"""
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        k = max(15, min(h, w) // 40) | 1
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+        cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+        c = max(cnts, key=cv2.contourArea)
+        if cv2.contourArea(c) < 0.35 * h * w:
+            return None
+        hull = cv2.convexHull(c)
+        peri = cv2.arcLength(hull, True)
+        quad = None
+        for eps in (0.01, 0.02, 0.035, 0.05):
+            approx = cv2.approxPolyDP(hull, eps * peri, True)
+            if len(approx) == 4:
+                q = self._order_pts(approx.reshape(4, 2))
+                if cv2.contourArea(q) > 0.3 * h * w:
+                    quad = q
+                    break
+        if quad is None:
+            quad = self._order_pts(cv2.boxPoints(cv2.minAreaRect(hull)))
+        return self._refine_edges(gray, quad)
+
+    def _refine_edges(self, gray: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """把四条边向内吸附到真实的纸面亮暗边界，剔除带入的深色背景。"""
+        h, w = gray.shape[:2]
+        bright = gray[gray > 110]
+        thr = float(np.clip(0.9 * np.percentile(bright, 10), 110, 170)) if bright.size else 130.0
+        mean_map = cv2.boxFilter(gray, -1, (13, 13), normalize=True)
+        quad = q.astype(np.float64)
+
+        def walk_boundary(p0: np.ndarray, n: np.ndarray, limit: float) -> np.ndarray | None:
+            """从 p0 沿内侧法线走到亮区边界，返回边界点；走不到返回 None。"""
+            for s in np.arange(2.0, limit, 2.0):
+                p = p0 + n * s
+                x = int(np.clip(p[0], 0, w - 1))
+                y = int(np.clip(p[1], 0, h - 1))
+                if mean_map[y, x] >= thr:
+                    return p0 + n * max(s - 2.0, 0.0)  # 退一步贴住边界
+            return None
+
+        lines: list[tuple[np.ndarray, np.ndarray]] = []
+        for i in range(4):
+            a, b = quad[i], quad[(i + 1) % 4]
+            d = b - a
+            length = float(np.hypot(d[0], d[1]))
+            normal = np.array([-d[1], d[0]]) / length  # 顺时针四边形的内侧法线
+            samples: list[np.ndarray] = []
+            offsets: list[float] = []
+            for t in np.linspace(0.06, 0.94, 33):
+                p0 = a + d * t
+                x0 = int(np.clip(p0[0], 0, w - 1))
+                y0 = int(np.clip(p0[1], 0, h - 1))
+                if mean_map[y0, x0] >= thr:  # 起点已在纸内，偏移记 0
+                    samples.append(p0)
+                    offsets.append(0.0)
+                    continue
+                hit = walk_boundary(p0, normal, 0.20 * length)
+                if hit is not None:
+                    samples.append(hit)
+                    offsets.append(float((hit - p0) @ normal))
+            pts = []
+            if len(offsets) >= 12:
+                # 滑动中位数平滑吸附偏移，剔除偶发亮点导致的早停离群点
+                offs = np.array(offsets)
+                k = 5
+                pad = np.pad(offs, k // 2, mode="edge")
+                smooth = np.array([np.median(pad[j : j + k]) for j in range(len(offs))])
+                keep = np.abs(offs - smooth) <= max(15.0, 0.03 * length)
+                pts = [p for p, kp in zip(samples, keep) if kp]
+            if len(pts) < 10:  # 有效点太少，保持原边
+                pts = [a, b]
+            vx, vy, x0, y0 = cv2.fitLine(
+                np.array(pts, np.float32), cv2.DIST_L1, 0, 0.01, 0.01
+            ).ravel()
+            lines.append((np.array([vx, vy]), np.array([x0, y0])))
+
+        # 第二遍巡检：拟合直线若仍压在深色背景上（如卷角内凹处），整线向内平移
+        adj_lines: list[tuple[np.ndarray, np.ndarray]] = []
+        for i in range(4):
+            v, p = lines[i]
+            d = quad[(i + 1) % 4] - quad[i]
+            length = float(np.hypot(d[0], d[1]))
+            normal = np.array([-d[1], d[0]]) / length
+            max_res = 0.0
+            for t in np.linspace(0.03, 0.97, 51):
+                target = quad[i] + d * t
+                s = float((target - p) @ v)
+                pl = p + v * s
+                x = int(np.clip(pl[0], 0, w - 1))
+                y = int(np.clip(pl[1], 0, h - 1))
+                if mean_map[y, x] >= thr:
+                    continue
+                for s2 in np.arange(2.0, 0.05 * length, 2.0):
+                    pk = pl + normal * s2
+                    xk = int(np.clip(pk[0], 0, w - 1))
+                    yk = int(np.clip(pk[1], 0, h - 1))
+                    if mean_map[yk, xk] >= thr:
+                        max_res = max(max_res, s2)
+                        break
+            # 仅当确实存在压背景区段时才内移；原生页面整线不动
+            shift = max_res + 2.0 if max_res > 0.0 else 0.0
+            adj_lines.append((v, p + normal * shift))
+
+        out = []
+        for i in range(4):
+            (v1, p1), (v2, p2) = adj_lines[(i - 1) % 4], adj_lines[i]
+            mat = np.array([v1, -v2]).T
+            if abs(float(np.linalg.det(mat))) < 1e-6:
+                out.append(quad[i])
+                continue
+            t = np.linalg.solve(mat, p2 - p1)
+            out.append(p1 + v1 * t[0])
+        result = np.array(out)
+        # 校验：新四角位移和面积变化过大则放弃本次修正
+        if (
+            cv2.contourArea(result.astype(np.float32)) < 0.7 * cv2.contourArea(quad.astype(np.float32))
+            or float(np.max(np.linalg.norm(result - quad, axis=1))) > 0.12 * max(h, w)
+        ):
+            return quad.astype(np.float32)
+        return self._order_pts(result).astype(np.float32)
+
+    @staticmethod
+    def _order_pts(pts: np.ndarray) -> np.ndarray:
+        """四点按 左上/右上/右下/左下 排序（float32，供 cv2.contourArea 等使用）。"""
+        p = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+        s = p.sum(axis=1)
+        d = p[:, 1] - p[:, 0]
+        tl, br = p[np.argmin(s)], p[np.argmax(s)]
+        tr, bl = p[np.argmin(d)], p[np.argmax(d)]
+        return np.array([tl, tr, br, bl], dtype=np.float32)
+
+    def _warp_paper(self, img: np.ndarray, quad: np.ndarray) -> np.ndarray:
+        """按四角透视矫正，输出纸面矩形图（四角顺序同 _order_pts）。"""
+        tl, tr, br, bl = quad
+        w_out = int(round(max(float(np.linalg.norm(tr - tl)), float(np.linalg.norm(br - bl)))))
+        h_out = int(round(max(float(np.linalg.norm(bl - tl)), float(np.linalg.norm(br - tr)))))
+        dst = np.array(
+            [[0, 0], [w_out - 1, 0], [w_out - 1, h_out - 1], [0, h_out - 1]], dtype=np.float32
+        )
+        mat = cv2.getPerspectiveTransform(quad.astype(np.float32), dst)
+        out = cv2.warpPerspective(
+            img, mat, (w_out, h_out),
+            flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE,
+        )
+        m = 3  # 裁掉边缘一圈，避免带入桌面背景
+        return out[m : h_out - m, m : w_out - m]
+
+    # ---------- 提白增强 ----------
+
+    def _enhance(self, img: np.ndarray, threshold: int) -> np.ndarray:
+        """逐通道背景除法提白 + 黑白场拉伸 + 轻度锐化，返回 RGB 图像。"""
+        h, w = img.shape[:2]
+        black = float(min(160, max(24, threshold * 3 // 2)))
+        white = 232.0
+        out = np.empty((h, w, 3), np.uint8)
+        bh, bw = max(1, h // _BG_DOWNSCALE), max(1, w // _BG_DOWNSCALE)
+        sigma = max(15.0, 0.09 * min(bh, bw))
+        for c in range(3):
+            ch = img[:, :, c].astype(np.float32)
+            small = cv2.resize(ch, (bw, bh), interpolation=cv2.INTER_AREA)
+            bg = cv2.GaussianBlur(small, (0, 0), sigma)
+            bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR)
+            # 相除后底色拉平到 1.0（白），宽黑印记随局部背景估计保留为深色
+            ratio = np.clip(ch / np.maximum(bg, 1.0), 0.0, 1.0) * 255.0
+            stretched = np.clip((ratio - black) / (white - black) * 255.0, 0.0, 255.0)
+            out[:, :, c] = stretched.astype(np.uint8)
+        blur = cv2.GaussianBlur(out, (0, 0), 1.0)
+        return cv2.addWeighted(out, 1.4, blur, -0.4, 0)
+
+    # ---------- 写出 ----------
+
+    def _png_bytes(self, img: np.ndarray) -> bytes:
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:  # pragma: no cover - imencode 实际不会失败
+            raise PdfWriteError("PNG 编码失败")
+        return buf.tobytes()
+
+    def _write(self, doc: pymupdf.Document, target: Path) -> None:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            doc.save(str(target), deflate=True, garbage=3)
+        except Exception as e:
+            raise PdfWriteError(f"写出文件失败: {e}") from e

@@ -1,0 +1,257 @@
+/** 图片转 PDF 对话框：多选图片 → 拖拽排序预览 → 保存路径 → 异步转换。
+ *
+ * 转换为后台任务：立即返回 task_id，进度/结果经 store.tasks 镜像
+ * （BackendEvents 统一订阅 conversion_progress / task_done / task_error）。
+ */
+import { useState } from "react";
+import { App, Button, Empty, InputNumber, List, Modal, Progress, Radio, Space, Typography } from "antd";
+import { HolderOutlined, PlusOutlined } from "@ant-design/icons";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { invoke } from "../../api/client";
+import { errorMessage, openPdfAtPath } from "../../api/commands";
+import { useDocumentStore } from "../../store/document";
+
+function SortableFileRow({ path, index }: { path: string; index: number }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: path,
+  });
+  const name = path.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? path;
+  return (
+    <div
+      ref={setNodeRef}
+      className="file-row"
+      style={{
+        transform: transform ? CSS.Transform.toString(transform) : undefined,
+        transition,
+        opacity: isDragging ? 0.7 : undefined,
+      }}
+    >
+      <span className="thumb-handle" title="拖拽排序" {...attributes} {...listeners}>
+        <HolderOutlined />
+      </span>
+      <Typography.Text ellipsis style={{ flex: 1 }} title={path}>
+        {index + 1}. {name}
+      </Typography.Text>
+    </div>
+  );
+}
+
+export function ImageToPdfDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { message } = App.useApp();
+  const tasks = useDocumentStore((s) => s.tasks);
+
+  const [files, setFiles] = useState<string[]>([]);
+  const [target, setTarget] = useState<string | null>(null);
+  const [pageSize, setPageSize] = useState<"auto" | "a4">("auto");
+  const [marginMm, setMarginMm] = useState(0);
+  const [taskId, setTaskId] = useState<string | null>(null);
+
+  const task = taskId ? tasks[taskId] : undefined;
+  const running = task?.status === "running";
+  const resultPath = task?.status === "done" ? (task.result ?? null) : null;
+
+  // 关闭时清空选择（渲染期调整状态：props 变化时重置本地 state）
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (prevOpen !== open) {
+    setPrevOpen(open);
+    if (!open) {
+      setFiles([]);
+      setTarget(null);
+      setTaskId(null);
+      setPageSize("auto");
+      setMarginMm(0);
+    }
+  }
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const pickImages = async () => {
+    try {
+      const picked = await invoke<string[] | null>("dialog.pick_image_files");
+      if (picked && picked.length > 0) setFiles(picked);
+    } catch (e) {
+      void message.error(`选择图片失败：${errorMessage(e)}`);
+    }
+  };
+
+  const pickTarget = async () => {
+    try {
+      const picked = await invoke<string | null>("dialog.pick_save_pdf_path", "images.pdf");
+      if (picked) setTarget(picked);
+    } catch (e) {
+      void message.error(`选择保存路径失败：${errorMessage(e)}`);
+    }
+  };
+
+  const start = async () => {
+    if (files.length === 0 || !target) return;
+    try {
+      const handle = await invoke<{ task_id: string }>(
+        "converter.convert_images_to_pdf",
+        files,
+        target,
+        pageSize,
+        marginMm,
+      );
+      setTaskId(handle.task_id);
+    } catch (e) {
+      void message.error(`启动转换失败：${errorMessage(e)}`);
+    }
+  };
+
+  const cancel = async () => {
+    if (!taskId) return;
+    try {
+      await invoke("converter.cancel_task", taskId);
+      void message.info("已请求取消，将在当前图片处理完后停止");
+    } catch (e) {
+      void message.error(`取消失败：${errorMessage(e)}`);
+    }
+  };
+
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    setFiles((fs) => {
+      const from = fs.indexOf(active.id as string);
+      const to = fs.indexOf(over.id as string);
+      return from < 0 || to < 0 ? fs : arrayMove(fs, from, to);
+    });
+  };
+
+  const percent =
+    task && typeof task.done === "number" && typeof task.total === "number" && task.total > 0
+      ? Math.round((task.done / task.total) * 100)
+      : undefined;
+
+  return (
+    <Modal
+      title="图片转 PDF"
+      open={open}
+      onCancel={onClose}
+      maskClosable={false}
+      width={640}
+      footer={
+        resultPath ? [
+          <Button
+            key="open"
+            type="primary"
+            onClick={() => {
+              void openPdfAtPath(resultPath).catch((e) =>
+                message.error(`打开失败：${errorMessage(e)}`),
+              );
+              onClose();
+            }}
+          >
+            打开生成的 PDF
+          </Button>,
+          <Button key="close" onClick={onClose}>
+            完成
+          </Button>,
+        ] : running ? [
+          <Button key="cancel" danger onClick={() => void cancel()}>
+            取消
+          </Button>,
+        ] : [
+          <Button key="close" onClick={onClose}>
+            关闭
+          </Button>,
+          <Button
+            key="start"
+            type="primary"
+            disabled={files.length === 0 || !target}
+            onClick={() => void start()}
+          >
+            开始转换
+          </Button>,
+        ]
+      }
+    >
+      {resultPath ? (
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Typography.Text>转换完成，文件已保存到：</Typography.Text>
+          <Typography.Text copyable code>
+            {resultPath}
+          </Typography.Text>
+        </Space>
+      ) : running ? (
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Progress percent={percent ?? 0} status="active" />
+          <Typography.Text type="secondary">
+            {task?.stage ?? "正在转换…"}（共 {files.length} 张图片）
+          </Typography.Text>
+        </Space>
+      ) : (
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Button icon={<PlusOutlined />} onClick={() => void pickImages()}>
+            选择图片（可多选）
+          </Button>
+          {files.length === 0 ? (
+            <Empty description="尚未选择图片" />
+          ) : (
+            <div className="file-list">
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+                <SortableContext items={files} strategy={verticalListSortingStrategy}>
+                  <List
+                    size="small"
+                    bordered
+                    dataSource={files}
+                    renderItem={(path, index) => (
+                      <List.Item style={{ padding: "4px 8px" }}>
+                        <SortableFileRow path={path} index={index} />
+                      </List.Item>
+                    )}
+                  />
+                </SortableContext>
+              </DndContext>
+              <Typography.Text type="secondary">
+                共 {files.length} 张，按列表顺序逐张成页，可拖动调整顺序
+              </Typography.Text>
+            </div>
+          )}
+          <Space wrap>
+            <Typography.Text strong>页面尺寸：</Typography.Text>
+            <Radio.Group
+              value={pageSize}
+              onChange={(e) => setPageSize(e.target.value as "auto" | "a4")}
+              optionType="button"
+              options={[
+                { value: "auto", label: "跟随图片" },
+                { value: "a4", label: "A4" },
+              ]}
+            />
+            <Typography.Text strong>页边距 (mm)：</Typography.Text>
+            <InputNumber min={0} max={50} value={marginMm} onChange={(v) => setMarginMm(v ?? 0)} />
+          </Space>
+          <Space wrap>
+            <Button onClick={() => void pickTarget()}>{target ? "更改保存路径" : "选择保存路径"}</Button>
+            {target && (
+              <Typography.Text code ellipsis style={{ maxWidth: 380 }} title={target}>
+                {target}
+              </Typography.Text>
+            )}
+          </Space>
+        </Space>
+      )}
+    </Modal>
+  );
+}

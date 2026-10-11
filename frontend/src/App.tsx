@@ -1,0 +1,73 @@
+/** 应用布局：顶部工具栏、左侧缩略图、右侧阅读区 + 各功能对话框。 */
+import { useEffect, useState } from "react";
+import { App as AntApp, Layout } from "antd";
+import { Toolbar } from "./components/Toolbar";
+import { ThumbnailGrid } from "./components/ThumbnailGrid";
+import { ViewerPanel } from "./components/ViewerPanel";
+import { BackendEvents } from "./components/BackendEvents";
+import { SplitDialog } from "./components/dialogs/SplitDialog";
+import { ImageToPdfDialog } from "./components/dialogs/ImageToPdfDialog";
+import { WordToPdfDialog } from "./components/dialogs/WordToPdfDialog";
+import { ExtractPagesDialog } from "./components/dialogs/ExtractPagesDialog";
+import { ScanDialog } from "./components/dialogs/ScanDialog";
+import { PasswordDialog } from "./components/dialogs/PasswordDialog";
+import { invoke, pywebviewReady } from "./api/client";
+import { useDocumentStore } from "./store/document";
+
+const { Header, Sider, Content } = Layout;
+
+export function App() {
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [imageDialogOpen, setImageDialogOpen] = useState(false);
+  const [wordDialogOpen, setWordDialogOpen] = useState(false);
+  const [extractOpen, setExtractOpen] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
+  const setBridgeReady = useDocumentStore((s) => s.setBridgeReady);
+
+  // 启动时序（spec 5.6）：等待 pywebviewready 后再 invoke；client.ts 已内部排队
+  useEffect(() => {
+    let cancelled = false;
+    pywebviewReady()
+      .then(async () => {
+        if (cancelled) return;
+        setBridgeReady(true);
+        // 连通性自检，失败不阻塞 UI（Toolbar 的 Tag 会提示状态）
+        await invoke<string>("ping").catch(() => undefined);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [setBridgeReady]);
+
+  return (
+    <AntApp>
+      <BackendEvents />
+      <PasswordDialog />
+      <Layout style={{ height: "100vh" }}>
+        <Header style={{ padding: 0, background: "#fff" }}>
+          <Toolbar
+            onOpenSplit={() => setSplitOpen(true)}
+            onOpenImageToPdf={() => setImageDialogOpen(true)}
+            onOpenWordToPdf={() => setWordDialogOpen(true)}
+            onOpenExtract={() => setExtractOpen(true)}
+            onOpenScan={() => setScanOpen(true)}
+          />
+        </Header>
+        <Layout>
+          <Sider width={250} theme="light" className="app-sider">
+            <ThumbnailGrid />
+          </Sider>
+          <Content>
+            <ViewerPanel />
+          </Content>
+        </Layout>
+      </Layout>
+      <SplitDialog open={splitOpen} onClose={() => setSplitOpen(false)} />
+      <ImageToPdfDialog open={imageDialogOpen} onClose={() => setImageDialogOpen(false)} />
+      <WordToPdfDialog open={wordDialogOpen} onClose={() => setWordDialogOpen(false)} />
+      <ExtractPagesDialog open={extractOpen} onClose={() => setExtractOpen(false)} />
+      <ScanDialog open={scanOpen} onClose={() => setScanOpen(false)} />
+    </AntApp>
+  );
+}

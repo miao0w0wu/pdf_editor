@@ -1,0 +1,226 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261011T013041793Z-2708-c4d4beb6f571",
+  "runId": "20261011T013041793Z-2708-c4d4beb6f571",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline_partial: baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": null,
+  "diffHash": "403cb0d0dea3a166feed91afdfca5d66cbef6ff1bc2674fb1bdaf9389c08f4fd",
+  "rulesVersion": "unavailable",
+  "sessionHash": "227d19c1e5b4e1febc04696ac1e82a3548f61102353acf7713416afa6edde902",
+  "reportRef": ".mimosa/reports/task-review-sess_2199e63b-1c43-4c95-b82c-57c5c3dabc32-20261011T013041793Z-2708-c4d4beb6f571.json",
+  "events": [
+    {
+      "eventId": "hook-2e3397f46b1769d6578d733f1fb7e7b0",
+      "findingId": "mimosa-1fa414d3033e1c23bc0df798",
+      "type": "finding_observed",
+      "at": "2026-10-11T01:30:41.793Z",
+      "identity": {
+        "projectRelativeFile": "frontend/package.json",
+        "ruleId": "mimosa.supply.version-range",
+        "codeEvidenceHash": "bd39460a140c3af02d0c1134330b9d1fab87690ab3268c3a913bc11efcb95614",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 16,
+      "endLine": 16,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "bd39460a140c3af02d0c1134330b9d1fab87690ab3268c3a913bc11efcb95614"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-c13f851ab53919f8cad3598a1aaf0350",
+      "findingId": "mimosa-57d7f6df2eaa2a861b7ed1bc",
+      "type": "finding_observed",
+      "at": "2026-10-11T01:30:41.793Z",
+      "identity": {
+        "projectRelativeFile": "frontend/package.json",
+        "ruleId": "mimosa.supply.version-range",
+        "codeEvidenceHash": "446b0e13f466b6c5c5b9aa9bfbbefd9169f2a6cf4f5cb20dde34a90a95ed2fe2",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 26,
+      "endLine": 26,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "446b0e13f466b6c5c5b9aa9bfbbefd9169f2a6cf4f5cb20dde34a90a95ed2fe2"
+      },
+      "sequence": 1
+    },
+    {
+      "eventId": "hook-a40671864012247bfd4e8dcd45328465",
+      "findingId": "mimosa-4590f7fd398d7f8776949e2a",
+      "type": "finding_observed",
+      "at": "2026-10-11T01:30:41.793Z",
+      "identity": {
+        "projectRelativeFile": "frontend/package.json",
+        "ruleId": "mimosa.supply.version-range",
+        "codeEvidenceHash": "7d6cadadb72cf71d339a8b70b055c74851e8655ccbfbe5732c35c652a7380654",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 27,
+      "endLine": 27,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "7d6cadadb72cf71d339a8b70b055c74851e8655ccbfbe5732c35c652a7380654"
+      },
+      "sequence": 2
+    },
+    {
+      "eventId": "hook-960b5e7f79a49e9dea008e7197628106",
+      "findingId": "mimosa-f057867a7f8e448d873ef9c5",
+      "type": "finding_observed",
+      "at": "2026-10-11T01:30:41.793Z",
+      "identity": {
+        "projectRelativeFile": "frontend/package.json",
+        "ruleId": "mimosa.supply.version-range",
+        "codeEvidenceHash": "89929b5f1f0568cfc16d6fbb04201f11a8a6396470a6b17e12d673239a66247a",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 29,
+      "endLine": 29,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "89929b5f1f0568cfc16d6fbb04201f11a8a6396470a6b17e12d673239a66247a"
+      },
+      "sequence": 3
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "frontend/src/types.ts",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/store/document.ts",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/api/commands.ts",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/BackendEvents.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/ViewerPanel.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/ThumbnailGrid.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/Toolbar.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/dialogs/SplitDialog.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/dialogs/ImageToPdfDialog.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/dialogs/WordToPdfDialog.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/components/dialogs/PasswordDialog.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "frontend/src/App.tsx",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "scripts/e2e_smoke.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/pdf_editor/models/page_item.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/pdf_editor/utils/static_server.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/pdf_editor/core/image_converter.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/pdf_editor/__main__.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "launcher.py",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-10-11T01:30:42.173Z"
+}

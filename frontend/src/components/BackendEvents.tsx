@@ -1,0 +1,67 @@
+/** 全局后端事件订阅：把事件分发到 store，转换任务给出 toast 反馈。
+ *
+ * 必须挂在 <AntApp> 内部以使用 App.useApp() 的 message（antd v5 上下文）。
+ */
+import { App } from "antd";
+import { useEffect } from "react";
+import { subscribe } from "../api/client";
+import type {
+  ConversionProgressPayload,
+  TaskDonePayload,
+  TaskErrorPayload,
+  ThumbnailsReadyPayload,
+} from "../types";
+import { useDocumentStore } from "../store/document";
+
+export function BackendEvents() {
+  const { message } = App.useApp();
+
+  useEffect(
+    () =>
+      subscribe((event) => {
+        const store = useDocumentStore.getState();
+        switch (event.type) {
+          case "thumbnails_ready": {
+            const p = event.payload as unknown as ThumbnailsReadyPayload;
+            store.setThumbnail(p.index, p.data_url);
+            break;
+          }
+          case "conversion_progress": {
+            const p = event.payload as unknown as ConversionProgressPayload;
+            store.upsertTask({
+              taskId: p.task_id,
+              kind: store.tasks[p.task_id]?.kind ?? "unknown",
+              status: "running",
+              stage: p.stage,
+              done: p.done,
+              total: p.total,
+            });
+            break;
+          }
+          case "task_done": {
+            const p = event.payload as unknown as TaskDonePayload;
+            store.upsertTask({ taskId: p.task_id, kind: p.kind, status: "done", result: p.result });
+            if (p.kind === "image_to_pdf" || p.kind === "word_to_pdf" || p.kind === "pages_to_scan") {
+              void message.success(`转换完成：${p.result ?? ""}`);
+            }
+            break;
+          }
+          case "task_error": {
+            const p = event.payload as unknown as TaskErrorPayload;
+            store.upsertTask({
+              taskId: p.task_id,
+              kind: p.kind,
+              status: "error",
+              code: p.code,
+              message: p.message,
+            });
+            void message.error(`任务失败（${p.code}）：${p.message}`);
+            break;
+          }
+        }
+      }),
+    [message],
+  );
+
+  return null;
+}

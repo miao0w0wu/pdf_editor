@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: pdf-editor
+Version: 0.1.0
+Summary: 跨平台 PDF 编辑桌面工具：Python 后端 + pywebview + React + Ant Design
+Requires-Python: >=3.10
+Requires-Dist: pypdf>=4.0
+Requires-Dist: PyMuPDF>=1.24
+Requires-Dist: Pillow>=10.0
+Requires-Dist: pywebview>=5.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: pyinstaller; extra == "dev"

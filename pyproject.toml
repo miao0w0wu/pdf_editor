@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-editor"
+version = "0.1.0"
+description = "跨平台 PDF 编辑桌面工具：Python 后端 + pywebview + React + Ant Design"
+requires-python = ">=3.10"
+dependencies = [
+    "pypdf>=4.0",
+    "PyMuPDF>=1.24",
+    "Pillow>=10.0",
+    "pywebview>=5.0",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov", "ruff", "mypy", "pyinstaller"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/pdf_editor/core", "src/pdf_editor/models", "src/pdf_editor/utils"]
+
+[[tool.mypy.overrides]]
+module = "pdf_editor.core.pdf_renderer"
+# PyMuPDF 的 Python API 未完整标注类型（no-untyped-call / no-any-return）。
+# 渲染已收敛在适配器内、可整体替换（spec 8.3），故仅对此模块放宽这两项。
+disallow_untyped_calls = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = "pdf_editor.core.scan_converter"
+# 同上：扫描件转换是 PyMuPDF 渲染/写出的又一个收敛点，放宽同一对规则。
+disallow_untyped_calls = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+module = "cv2"
+# OpenCV 官方 wheel 未提供完整类型标注
+ignore_missing_imports = true

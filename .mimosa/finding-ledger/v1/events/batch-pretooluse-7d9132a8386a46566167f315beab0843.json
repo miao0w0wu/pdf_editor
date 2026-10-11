@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "pretooluse-7d9132a8386a46566167f315beab0843",
+  "runId": null,
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "PreToolUse"
+  },
+  "revision": null,
+  "diffHash": null,
+  "rulesVersion": null,
+  "sessionHash": "2e08c1359305128f56160eaac1b570451e26fa9a0184eee4288f9bfc6c396d64",
+  "reportRef": null,
+  "events": [
+    {
+      "eventId": "hook-de080690cb7bf9ae9756fab6125c9949",
+      "findingId": "mimosa-7a72f3b03be5272743e166d5",
+      "type": "finding_blocked",
+      "at": "2026-10-10T09:41:42.278Z",
+      "identity": {
+        "projectRelativeFile": "src/pdf_editor/core/image_converter.py",
+        "ruleId": "security",
+        "codeEvidenceHash": "c11177fcd1d9917f17de4a24390cda54f27e646dd80c5549583ae3bddc63e50e",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 68,
+      "endLine": 68,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "c11177fcd1d9917f17de4a24390cda54f27e646dd80c5549583ae3bddc63e50e"
+      },
+      "sequence": 0
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-10-10T09:41:42.688Z"
+}
